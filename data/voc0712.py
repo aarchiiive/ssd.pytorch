@@ -69,10 +69,10 @@ class VOCAnnotationTransform(object):
             # TODO: check whether it is necessary to use int
             # Coordinates may be float type
             bbox = [
-                int(float(bnd_box.find('xmin').text)),
-                int(float(bnd_box.find('ymin').text)),
-                int(float(bnd_box.find('xmax').text)),
-                int(float(bnd_box.find('ymax').text))
+                int(float(bnd_box.find('xmin').text)) / width,
+                int(float(bnd_box.find('ymin').text)) / height,
+                int(float(bnd_box.find('xmax').text)) / width,
+                int(float(bnd_box.find('ymax').text)) / height,
             ]
             ignore = False
             if difficult or ignore:
