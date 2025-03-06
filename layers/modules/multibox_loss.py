@@ -70,6 +70,8 @@ class MultiBoxLoss(nn.Module):
             truths = targets[idx][:, :-1].data
             labels = targets[idx][:, -1].data
             defaults = priors.data
+            if truths.numel() == 0:
+                continue  # skip this batch
             match(self.threshold, truths, defaults, self.variance, labels,
                        loc_t, conf_t, idx)
         if self.use_gpu:

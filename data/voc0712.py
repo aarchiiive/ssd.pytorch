@@ -13,6 +13,9 @@ import torch
 import torch.utils.data as data
 import cv2
 import numpy as np
+from PIL import Image
+
+
 if sys.version_info[0] == 2:
     import xml.etree.cElementTree as ET
 else:
@@ -43,35 +46,6 @@ class VOCAnnotationTransform(object):
             zip(VOC_CLASSES, range(len(VOC_CLASSES))))
         self.keep_difficult = keep_difficult
         self.cat2label = {cat: i for i, cat in enumerate(VOC_CLASSES)}
-    # def __call__(self, target, width, height):
-    #     """
-    #     Arguments:
-    #         target (annotation) : the target annotation to be made usable
-    #             will be an ET.Element
-    #     Returns:
-    #         a list containing lists of bounding boxes  [bbox coords, class name]
-    #     """
-    #     res = []
-    #     for obj in target.iter('object'):
-    #         difficult = int(obj.find('difficult').text) == 1
-    #         if not self.keep_difficult and difficult:
-    #             continue
-    #         name = obj.find('name').text.strip()
-    #         bbox = obj.find('bndbox')
-
-    #         pts = ['xmin', 'ymin', 'xmax', 'ymax']
-    #         bndbox = []
-    #         for i, pt in enumerate(pts):
-    #             cur_pt = int(bbox.find(pt).text) - 1
-    #             # scale height or width
-    #             cur_pt = cur_pt / width if i % 2 == 0 else cur_pt / height
-    #             bndbox.append(cur_pt)
-    #         label_idx = self.class_to_ind[name]
-    #         bndbox.append(label_idx)
-    #         res += [bndbox]  # [xmin, ymin, xmax, ymax, label_ind]
-    #         # img_id = target.find('filename').text[:-4]
-
-    #     return res  # [[xmin, ymin, xmax, ymax, label_ind], ... ]
 
     def __call__(self, target, width, height):
         """
@@ -101,11 +75,6 @@ class VOCAnnotationTransform(object):
                 int(float(bnd_box.find('ymax').text))
             ]
             ignore = False
-            # if self.min_size:
-            #     w = bbox[2] - bbox[0]
-            #     h = bbox[3] - bbox[1]
-            #     if w < self.min_size or h < self.min_size:
-            #         ignore = True
             if difficult or ignore:
                 bboxes_ignore.append(bbox)
                 labels_ignore.append(label)
@@ -154,11 +123,17 @@ class VOCDetection(data.Dataset):
             (default: 'VOC2007')
     """
 
-    def __init__(self, root,
-                 image_sets=[('2007', 'trainval'), ('2012', 'trainval')],
-                 method='dark',
-                 transform=None, target_transform=VOCAnnotationTransform(),
-                 dataset_name='VOC0712'):
+    def __init__(
+        self,
+        root,
+        image_sets=[('2007', 'trainval'), ('2012', 'trainval')],
+        method='dark',
+        transform=None,
+        target_transform=VOCAnnotationTransform(),
+        dataset_name='VOC0712',
+        phase='train',
+        filter_empty_gt=True
+    ):
         self.root = Path(root)
         self.image_set = image_sets
         self.transform = transform
@@ -168,13 +143,13 @@ class VOCDetection(data.Dataset):
         self._imgpath = osp.join('%s', 'JPEGImages', '%s.jpg')
         self.ids = list()
         self.method = method
+        self.filter_empty_gt = filter_empty_gt
         self.img_folder = f'IMGS_{method}'
+        self.data_infos = self.load_annotations()
+        self.data_infos = [self.data_infos[i] for i in self._filter_imgs()]
 
-        # for (year, name) in image_sets:
-        for name in ['train', 'val']:
-            # rootpath = osp.join(self.root, 'VOC' + year)
-            for line in open(osp.join(root, 'main', name + '.txt')):
-                self.ids.append((root, line.strip()))
+        # for line in open(osp.join(root, 'main', phase + '.txt')):
+        #     self.ids.append((root, line.strip()))
 
     def __getitem__(self, index):
         im, gt, h, w = self.pull_item(index)
@@ -182,16 +157,65 @@ class VOCDetection(data.Dataset):
         return im, gt
 
     def __len__(self):
-        return len(self.ids)
+        # return len(self.ids)
+        return len(self.data_infos)
+
+    def load_annotations(self):
+        """Load annotation from XML style ann_file.
+        Returns:
+            list[dict]: Annotation info from XML file.
+        """
+        image_dir = self.root / 'JPEGImages' / self.img_folder
+
+        data_infos = []
+        img_ids = [img_id.name for img_id in image_dir.glob('*')]
+        for img_id in img_ids:
+            filename = img_id
+            xml_path = self.root / 'Annotations' / 'LABLE' / f'{img_id}.xml'
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+            size = root.find('size')
+            width = 0
+            height = 0
+            if size is not None:
+                width = int(size.find('width').text)
+                height = int(size.find('height').text)
+            else:
+                img_path = osp.join(self.img_prefix, '{}'.format(img_id))
+                img = Image.open(img_path)
+                width, height = img.size
+            data_infos.append(
+                dict(id=img_id, filename=filename, width=width, height=height)
+            )
+
+        return data_infos
+
+    def _filter_imgs(self, min_size=32):
+        """Filter images too small or without annotation."""
+        valid_inds = []
+        for i, img_info in enumerate(self.data_infos):
+            if min(img_info['width'], img_info['height']) < min_size:
+                continue
+            if self.filter_empty_gt:  # True
+                img_id = img_info['id']
+                xml_path = self.root / 'Annotations' / 'LABLE' / f'{img_id}.xml'
+                tree = ET.parse(xml_path)
+                root = tree.getroot()
+                for obj in root.findall('object'):
+                    name = obj.find('name').text
+                    if name in VOC_CLASSES:
+                        valid_inds.append(i)
+                        break
+            else:
+                valid_inds.append(i)
+        return valid_inds
 
     def pull_item(self, index):
-        img_id = self.ids[index]
+        img_id = self.data_infos[index]['id']
 
-        # target = ET.parse(self._annopath % img_id).getroot()
-        # img = cv2.imread(self._imgpath % img_id)
-        xml_path = self.root / 'Annotations' / 'LABLE' / f'{img_id[1]}.xml'
+        xml_path = self.root / 'Annotations' / 'LABLE' / f'{img_id}.xml'
         target = ET.parse(xml_path).getroot()
-        img = cv2.imread(str(self.root / 'JPEGImages' / self.img_folder / img_id[1]))
+        img = cv2.imread(str(self.root / 'JPEGImages' / self.img_folder / img_id))
 
         height, width, channels = img.shape
 
@@ -206,11 +230,7 @@ class VOCDetection(data.Dataset):
             # img = img.transpose(2, 0, 1)
             target = np.hstack((boxes, np.expand_dims(labels, axis=1)))
 
-        # print('img.shape: ', img.shape)
-        # print('target.shape: ', target.shape)
-
         return torch.from_numpy(img).permute(2, 0, 1), target, height, width
-        # return torch.from_numpy(img), target, height, width
 
     def pull_image(self, index):
         '''Returns the original image object at index in PIL form

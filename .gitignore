@@ -126,3 +126,9 @@ data/ssd_dataloader.py
 
 # pylint
 .pylintrc
+
+# wandb
+wandb/
+
+# logs
+runs/

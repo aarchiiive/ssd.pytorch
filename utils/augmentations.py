@@ -256,9 +256,13 @@ class RandomSampleCrop(object):
                 if h / w < 0.5 or h / w > 2:
                     continue
 
-                left = random.uniform(width - w, width - w + 1)
+                # left = random.uniform(width - w)
+                # left = random.uniform(width - w, width - w + 1)
                 # top = random.uniform(height - h)
-                top = random.uniform(height - h, height - h + 1)
+                # top = random.uniform(height - h, height - h + 1)
+
+                left = random.uniform(0, width - w)
+                top = random.uniform(0, height - h)
 
                 # convert to integer rect x1,y1,x2,y2
                 rect = np.array([int(left), int(top), int(left+w), int(top+h)])

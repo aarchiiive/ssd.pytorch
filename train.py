@@ -3,12 +3,15 @@ from utils.augmentations import SSDAugmentation
 from layers.modules import MultiBoxLoss
 from ssd import build_ssd
 
+from pathlib import Path
 from tqdm import tqdm
+from datetime import datetime
 
 import os
 import sys
 import time
 
+import pytz
 import wandb
 
 import torch
@@ -20,6 +23,9 @@ import torch.nn.init as init
 import torch.utils.data as data
 import numpy as np
 import argparse
+import warnings
+
+warnings.filterwarnings("ignore")
 
 
 def str2bool(v):
@@ -31,6 +37,8 @@ parser = argparse.ArgumentParser(
 train_set = parser.add_mutually_exclusive_group()
 parser.add_argument('--dataset', default='VOC', choices=['VOC', 'COCO'],
                     type=str, help='VOC or COCO')
+parser.add_argument('--method', default='dark', type=str,
+                    help='Method for training')
 parser.add_argument('--dataset_root', default='Exdark/',
                     help='Dataset root directory path')
 parser.add_argument('--basenet', default='vgg16_reducedfc.pth',
@@ -53,50 +61,50 @@ parser.add_argument('--weight_decay', default=5e-4, type=float,
                     help='Weight decay for SGD')
 parser.add_argument('--gamma', default=0.1, type=float,
                     help='Gamma update for SGD')
-parser.add_argument('--visdom', default=False, type=str2bool,
-                    help='Use visdom for loss visualization')
-parser.add_argument('--save_folder', default='weights/',
-                    help='Directory for saving checkpoint models')
 args = parser.parse_args()
 
 
-# if torch.cuda.is_available():
-#     if args.cuda:
-#         torch.set_default_tensor_type('torch.cuda.FloatTensor')
-#     if not args.cuda:
-#         print("WARNING: It looks like you have a CUDA device, but aren't " +
-#               "using CUDA.\nRun with --cuda for optimal training speed.")
-#         torch.set_default_tensor_type('torch.FloatTensor')
-# else:
-#     torch.set_default_tensor_type('torch.FloatTensor')
-
-if not os.path.exists(args.save_folder):
-    os.mkdir(args.save_folder)
-
-
 def train():
-    # if args.dataset == 'COCO':
-    #     if args.dataset_root == VOC_ROOT:
-    #         if not os.path.exists(COCO_ROOT):
-    #             parser.error('Must specify dataset_root if specifying dataset')
-    #         print("WARNING: Using default COCO dataset_root because " +
-    #               "--dataset_root was not specified.")
-    #         args.dataset_root = COCO_ROOT
-    #     cfg = coco
-    #     dataset = COCODetection(root=args.dataset_root,
-    #                             transform=SSDAugmentation(cfg['min_dim'],
-    #                                                       MEANS))
-    # elif args.dataset == 'VOC':
-    # if args.dataset_root == COCO_ROOT:
-        # parser.error('Must specify dataset if specifying dataset_root')
+    KST = pytz.timezone('Asia/Seoul')
+
+    method = args.method
+    num_epochs = 100
+    batch_size = 160
+    num_workers = 8
+
+    lr_init = 0.0001                   # initial learning rate (SGD=1E-2, Adam=1E-3)
+    lr_min = 0.000001                   # minimum learning rate
+    lr_max = 0.001
+    warmup_ratio = 0.1
+
+    resume = None
+    use_wandb = False
+
+    project_name = 'Exdark'
+    exp_name = f'SSD-{method}'
+
+    if not resume:
+        save_dir = Path('runs')
+        timestamp = datetime.now(KST).strftime('%Y%m%d_%H%M%S')
+        save_dir = save_dir / f"{timestamp}_{exp_name}"
+        save_dir.mkdir(parents=True, exist_ok=True)
+        (save_dir / 'weights').mkdir(parents=True, exist_ok=True)
+        (save_dir / 'pr_curve').mkdir(parents=True, exist_ok=True)
+    else:
+        save_dir = Path(resume).parent
+
+    if use_wandb:
+        wandb.init(project=project_name, name=exp_name)
+        wandb.config.update({
+            'timestamp': timestamp,
+            'method': method,
+            'save_dir': save_dir
+        })
+
     cfg = voc
     dataset = VOCDetection(root=args.dataset_root,
-                            transform=SSDAugmentation(cfg['min_dim'],
-                                                        MEANS))
-
-    # if args.visdom:
-    #     import visdom
-    #     viz = visdom.Visdom()
+                            transform=SSDAugmentation(cfg['min_dim'], MEANS),
+                            method=method)
 
     ssd_net = build_ssd('train', cfg['min_dim'], cfg['num_classes'])
     net = ssd_net
@@ -133,36 +141,15 @@ def train():
     # loss counters
     loc_loss = 0
     conf_loss = 0
-    epoch = 0
     print('Loading the dataset...')
 
-    epoch_size = len(dataset) // args.batch_size
-    print('Training SSD on:', dataset.name)
-    print('Using the specified args:')
-    print(args)
-
-    step_index = 0
-
-    if args.visdom:
-        vis_title = 'SSD.PyTorch on ' + dataset.name
-        vis_legend = ['Loc Loss', 'Conf Loss', 'Total Loss']
-        iter_plot = create_vis_plot('Iteration', 'Loss', vis_title, vis_legend)
-        epoch_plot = create_vis_plot('Epoch', 'Loss', vis_title, vis_legend)
-
-    # generator = torch.Generator()
-    # if torch.cuda.is_available():
-    #     generator = generator.cuda()
-
-    data_loader = data.DataLoader(dataset, args.batch_size,
-                                  num_workers=args.num_workers,
-                                  shuffle=False, collate_fn=detection_collate,
+    data_loader = data.DataLoader(dataset, batch_size,
+                                  num_workers=num_workers,
+                                  shuffle=True, collate_fn=detection_collate,
                                   pin_memory=True)
 
-    lr_init = 0.0001                   # initial learning rate (SGD=1E-2, Adam=1E-3)
-    lr_min = 0.000001                   # minimum learning rate
-    lr_max = 0.001
-    warmup_ratio = 0.1
-    total_steps = cfg['max_iter']
+    num_steps_per_epoch = len(data_loader) # 데이터 사이즈? 7000
+    total_steps = num_epochs * num_steps_per_epoch
 
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
@@ -173,71 +160,38 @@ def train():
         cycle_momentum=False  # AdamW에서는 모멘텀 사용 안 함
     )
 
-    # create batch iterator
-    batch_iterator = iter(data_loader)
-    for iteration in tqdm(range(args.start_iter, cfg['max_iter'])):
-        if args.visdom and iteration != 0 and (iteration % epoch_size == 0):
-            update_vis_plot(epoch, loc_loss, conf_loss, epoch_plot, None,
-                            'append', epoch_size)
-            # reset epoch loss counters
-            loc_loss = 0
-            conf_loss = 0
-            epoch += 1
-
-        if iteration in cfg['lr_steps']:
-            step_index += 1
-            adjust_learning_rate(optimizer, args.gamma, step_index)
-
-        # load train data
-        images, targets = next(batch_iterator)
-
-        if args.cuda:
-            # images = Variable(images.cuda())
+    for epoch in range(num_epochs):
+        tbar = tqdm(data_loader)
+        for images, targets in tbar:
             images = images.cuda()
-            # targets = [Variable(ann.cuda(), volatile=True) for ann in targets]
             targets = [ann.cuda() for ann in targets]
-        else:
-            # images = Variable(images)
-            images = images
-            # targets = [Variable(ann, volatile=True) for ann in targets]
-            targets = [ann for ann in targets]
-        # forward
-        t0 = time.time()
-        out = net(images)
-        # backprop
-        optimizer.zero_grad()
-        # print(net.device)
-        # print(out[0].device)
-        # print(targets[0].device)
-        loss_l, loss_c = criterion(out, targets)
-        loss = loss_l + loss_c
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
 
-        t1 = time.time()
-        loc_loss += loss_l.item()
-        conf_loss += loss_c.item()
+            optimizer.zero_grad()
+            out = net(images)
+            loss_l, loss_c = criterion(out, targets)
+            loss = loss_l + loss_c
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
 
-        if iteration % 10 == 0:
-            print('timer: %.4f sec.' % (t1 - t0))
-            print('iter ' + repr(iteration) + ' || Loss: %.4f ||' % (loss.item()), end=' ')
+            loc_loss += loss_l.item()
+            conf_loss += loss_c.item()
+
+            tbar.set_description(f'Epoch {epoch} | Loss: {loss.item():.4f} | Loc Loss: {loss_l.item():.4f} | Conf Loss: {loss_c.item():.4f}')
+
+        if use_wandb:
             wandb.log({
                 'train/loss': loss.item(),
+                'train/loc_loss': loss_l.item(),
+                'train/conf_loss': loss_c.item(),
                 'train/lr': optimizer.param_groups[0]['lr'],
-            })
+            }, step=epoch)
 
-        if args.visdom:
-            update_vis_plot(iteration, loss_l.item(), loss_c.item(),
-                            iter_plot, epoch_plot, 'append')
-
-        if iteration != 0 and iteration % 5000 == 0:
-            print('Saving state, iter:', iteration)
-            torch.save(ssd_net.state_dict(), 'weights/ssd300_COCO_' +
-                       repr(iteration) + '.pth')
-    torch.save(ssd_net.state_dict(),
-               args.save_folder + '' + args.dataset + '.pth')
-
+        torch.save({
+            'model': ssd_net.state_dict(),
+            'epoch': epoch,
+            'loss': loss.item(),
+        }, save_dir / 'weights' / f'epoch_{epoch}.pth')
 
 def adjust_learning_rate(optimizer, gamma, step):
     """Sets the learning rate to the initial LR decayed by 10 at every
@@ -258,38 +212,6 @@ def weights_init(m):
     if isinstance(m, nn.Conv2d):
         xavier(m.weight.data)
         m.bias.data.zero_()
-
-
-def create_vis_plot(_xlabel, _ylabel, _title, _legend):
-    return viz.line(
-        X=torch.zeros((1,)).cpu(),
-        Y=torch.zeros((1, 3)).cpu(),
-        opts=dict(
-            xlabel=_xlabel,
-            ylabel=_ylabel,
-            title=_title,
-            legend=_legend
-        )
-    )
-
-
-def update_vis_plot(iteration, loc, conf, window1, window2, update_type,
-                    epoch_size=1):
-    viz.line(
-        X=torch.ones((1, 3)).cpu() * iteration,
-        Y=torch.Tensor([loc, conf, loc + conf]).unsqueeze(0).cpu() / epoch_size,
-        win=window1,
-        update=update_type
-    )
-    # initialize epoch plot on first iteration
-    if iteration == 0:
-        viz.line(
-            X=torch.zeros((1, 3)).cpu(),
-            Y=torch.Tensor([loc, conf, loc + conf]).unsqueeze(0).cpu(),
-            win=window2,
-            update=True
-        )
-
 
 if __name__ == '__main__':
     train()
