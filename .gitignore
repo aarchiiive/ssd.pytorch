@@ -132,3 +132,6 @@ wandb/
 
 # logs
 runs/
+
+# datasets
+Exdark/
