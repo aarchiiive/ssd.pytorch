@@ -131,7 +131,7 @@ data/ssd_dataloader.py
 wandb/
 
 # logs
-runs/
+runs
 
 # datasets
-Exdark/
+Exdark

@@ -11,7 +11,10 @@ loss_weights_dict = {
     # 0: [600, 700, 800, 900, 1000], #
 }
 
-methods = ['dark', 'GLARE', 'SCI', 'ZeroDCE', 'ZeroDCE++', 'RUAS', 'Retinexformer']
+methods = ['dark', 'GLARE'] # lambda3
+methods = ['SCI', 'ZeroDCE', 'ZeroDCE++'] # lambda5
+methods = ['RUAS'] # lambda1
+methods = ['Retinexformer'] # lambda2
 
 for method in methods:
     while True:  # 같은 loss_weight에 대해 무한 반복
